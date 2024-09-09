@@ -1,17 +1,16 @@
 const { v4: uuidv4 } = require('uuid');
 const WebSocket = require('ws');
-
+const dgram = require('dgram');
 const express = require('express');
 const { createServer } = require('http');
-
-const { exec } = require('child_process');
+const os = require('os');
 
 // 创建 Express 应用
 const app = express();
 
 // 启用CORS
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*'); // 允许所有域访问，也可以指定具体域
+  res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, PUT, POST, DELETE');
   res.header('Access-Control-Allow-Headers', 'Content-Type');
   next();
@@ -31,34 +30,61 @@ server.listen(8600, () => {
   console.log('HTTP and WebSocket server started on http://localhost:8600');
 });
 
-
-// 要执行的可执行程序路径
-const executablePath = './broadcast_server'; // 请替换为你的可执行程序路径
-
-// 执行可执行程序
-const childProcess = exec(executablePath, (error, stdout, stderr) => {
-  if (error) {
-    console.error(`执行失败: ${error.message}`);
-    return;
+// 获取广播地址函数
+function getBroadcastAddress() {
+  const interfaces = os.networkInterfaces();
+  
+  for (let name of Object.keys(interfaces)) {
+    for (let net of interfaces[name]) {
+      // 跳过IPv6和非内部网络接口
+      if (net.family === 'IPv4' && !net.internal) {
+        const ipParts = net.address.split('.').map(Number);
+        const subnetParts = net.netmask.split('.').map(Number);
+        
+        // 计算广播地址
+        const broadcastParts = ipParts.map((part, i) => part | (~subnetParts[i] & 255));
+        return broadcastParts.join('.');
+      }
+    }
   }
-  if (stderr) {
-    console.error(`错误输出: ${stderr}`);
-    return;
+  return null;
+}
+
+// 自动获取广播地址
+const BROADCAST_PORT = 8080;
+const BROADCAST_ADDR = getBroadcastAddress(); // 自动获取的广播地址
+const BROADCAST_INTERVAL_SEC = 2000; // 广播间隔时间（毫秒）
+
+// 创建 UDP 套接字
+const udpSocket = dgram.createSocket('udp4');
+
+// 设置广播权限
+udpSocket.on('listening', () => {
+  udpSocket.setBroadcast(true);
+  console.log(`UDP socket is listening and ready to broadcast on port ${BROADCAST_PORT}`);
+});
+
+// 定时广播消息
+setInterval(() => {
+  const message = Buffer.from('Stellarium Shared Memory Service');
+  if (BROADCAST_ADDR) {
+    udpSocket.send(message, 0, message.length, BROADCAST_PORT, BROADCAST_ADDR, (err) => {
+      if (err) {
+        console.error(`Error sending broadcast message: ${err}`);
+      } else {
+        // 打印广播发送的地址和端口
+        console.log(`Broadcast message sent to ${BROADCAST_ADDR}:${BROADCAST_PORT}`);
+      }
+    });
+  } else {
+    console.error('No broadcast address found.');
   }
-  console.log(`标准输出: ${stdout}`);
-});
+}, BROADCAST_INTERVAL_SEC);
 
-// 监听可执行程序的输出
-childProcess.stdout.on('data', (data) => {
-  console.log(`childProcess output: ${data}`);
-});
+// 启动 UDP socket
+udpSocket.bind(BROADCAST_PORT);
 
-// 监听可执行程序的错误输出
-childProcess.stderr.on('data', (data) => {
-  console.error(`childProcess error: ${data}`);
-});
-
-
+// WebSocket 心跳功能
 function noop() {}
 
 function heartbeat() {
@@ -68,13 +94,13 @@ function heartbeat() {
 wss.on('connection', function connection(ws) {
   const clientId = uuidv4(); // 为每个客户端分配一个唯一的ID
   ws.id = clientId; // 把ID存储在WebSocket对象上
-  
+
   // 打印连接信息
   console.log(`Client ${clientId} connected`);
-  
+
   ws.isAlive = true;
   ws.on('pong', heartbeat);
-  
+
   // 通知所有连接的客户端有新客户端连接
   const newClientMessage = {
     type: "Server_msg",
@@ -96,11 +122,11 @@ wss.on('connection', function connection(ws) {
       }
     });
   });
-  
+
   // 当客户端断开连接时
   ws.on('close', function close() {
     console.log(`Client ${clientId} disconnected`);
-    
+
     // 创建要发送的 JSON 消息
     const messageObj = {
       type: "Server_msg",
@@ -141,7 +167,10 @@ process.on('exit', () => {
   wss.close(() => {
     console.log('WebSocket server closed');
   });
+  // 关闭UDP socket
+  udpSocket.close(() => {
+    console.log('UDP socket closed');
+  });
 });
 
 console.log('WebSocket server started on ws://localhost:8600');
-
